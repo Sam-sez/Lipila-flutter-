@@ -23,16 +23,23 @@ class _BongScreenState extends State<BongScreen> {
   String? _mySessionToken;
   bool _open = false;
   bool _permissionsDenied = false;
+  bool _permissionsPermanentlyDenied = false;
+  List<String> _missingPermissions = [];
   List<BongDetectedDevice> _detected = [];
   DisplayIdentity? _selected;
   String? _error;
   Timer? _postTimer;
 
   Future<void> _openBong() async {
-    setState(() { _error = null; _permissionsDenied = false; });
-    final granted = await _ble.requestPermissions();
-    if (!granted) {
-      setState(() => _permissionsDenied = true);
+    setState(() { _error = null; _permissionsDenied = false; _permissionsPermanentlyDenied = false; });
+
+    final permissionResult = await _ble.requestPermissions();
+    if (!permissionResult.allGranted) {
+      setState(() {
+        _permissionsDenied = true;
+        _permissionsPermanentlyDenied = permissionResult.permanentlyDenied;
+        _missingPermissions = permissionResult.missing;
+      });
       return;
     }
 
@@ -47,8 +54,13 @@ class _BongScreenState extends State<BongScreen> {
 
     setState(() { _mySessionToken = token; _open = true; });
 
-    await _ble.startAdvertising(token);
-    await _ble.startScanning();
+    try {
+      await _ble.startAdvertising(token);
+      await _ble.startScanning();
+    } catch (e) {
+      setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _open = false; });
+      return;
+    }
 
     _sub = _ble.detectedStream.listen((snapshot) {
       setState(() => _detected = snapshot.where((d) => d.sessionToken != token).toList());
@@ -124,11 +136,25 @@ class _BongScreenState extends State<BongScreen> {
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(color: LipilaColors.paperDim, borderRadius: BorderRadius.circular(6)),
-                child: const Text(
-                  'Bong needs Bluetooth and location permissions to find nearby devices. '
-                  'Enable them in your phone settings and try again.',
-                  style: TextStyle(fontSize: 13),
-                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(
+                    _missingPermissions.isEmpty
+                        ? 'Bong needs Bluetooth and location permissions to find nearby devices.'
+                        : 'Missing: ${_missingPermissions.join(", ")}.',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_permissionsPermanentlyDenied) ...[
+                    const Text(
+                      "Android won't show the permission prompt again once denied — "
+                      "open Settings to turn these on manually.",
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton(onPressed: () => _ble.openSettings(), child: const Text('Open app settings')),
+                  ] else
+                    OutlinedButton(onPressed: _openBong, child: const Text('Try again')),
+                ]),
               ),
             if (!_open && _selected == null)
               ElevatedButton(

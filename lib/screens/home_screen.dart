@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:pdf/pdf.dart';
@@ -23,18 +24,31 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _qrApi = QrApi();
   StaticQrResult? _staticQr;
+  Uint8List? _staticQrBytes;
+  String? _qrLoadError;
 
   @override
   void initState() {
     super.initState();
+    _loadStaticQr();
+  }
+
+  Future<void> _loadStaticQr() async {
     final user = context.read<AuthProvider>().user!;
-    _qrApi.getStatic(user.id).then((r) => setState(() => _staticQr = r));
+    try {
+      final result = await _qrApi.getStatic(user.id);
+      final bytes = base64Decode(result.qrImage.split(',').last);
+      if (!mounted) return;
+      setState(() { _staticQr = result; _staticQrBytes = bytes; _qrLoadError = null; });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _qrLoadError = "Couldn't load your QR — check your connection.");
+    }
   }
 
   Future<void> _exportPdf(String displayName, String maskedNumber) async {
-    if (_staticQr == null) return;
-    final qrBytes = base64Decode(_staticQr!.qrImage.split(',').last);
-    final qrImage = pw.MemoryImage(qrBytes);
+    if (_staticQrBytes == null) return;
+    final qrImage = pw.MemoryImage(_staticQrBytes!);
 
     final doc = pw.Document();
     doc.addPage(
@@ -102,13 +116,19 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Column(children: [
                 const Text('Your QR', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
                 const SizedBox(height: 10),
-                if (_staticQr != null)
-                  Image.memory(base64Decode(_staticQr!.qrImage.split(',').last), width: 180, height: 180)
+                if (_staticQrBytes != null)
+                  Image.memory(_staticQrBytes!, width: 180, height: 180, gaplessPlayback: true)
+                else if (_qrLoadError != null)
+                  Column(children: [
+                    Text(_qrLoadError!, style: const TextStyle(color: LipilaColors.danger, fontSize: 13), textAlign: TextAlign.center),
+                    const SizedBox(height: 8),
+                    OutlinedButton(onPressed: _loadStaticQr, child: const Text('Retry')),
+                  ])
                 else
                   const SizedBox(height: 180, width: 180, child: Center(child: CircularProgressIndicator())),
                 const SizedBox(height: 10),
                 OutlinedButton(
-                  onPressed: _staticQr == null ? null : () => _exportPdf(displayName, user.maskedNumber),
+                  onPressed: _staticQrBytes == null ? null : () => _exportPdf(displayName, user.maskedNumber),
                   child: const Text('Export as PDF'),
                 ),
               ]),

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../state/auth_provider.dart';
@@ -18,7 +19,7 @@ class _RequestScreenState extends State<RequestScreen> {
   final _amountController = TextEditingController();
   final _noteController = TextEditingController();
   DynamicQrResult? _qr;
-  String? _qrImage;
+  Uint8List? _qrBytes; // decoded ONCE on generation, not on every rebuild
   int _secondsLeft = 0;
   Timer? _timer;
   String? _error;
@@ -33,8 +34,12 @@ class _RequestScreenState extends State<RequestScreen> {
     final user = context.read<AuthProvider>().user!;
     try {
       final result = await _qrApi.createDynamic(user.id, amount, _noteController.text.isEmpty ? null : _noteController.text);
-      final image = await _qrApi.getDynamicImage(result.qrToken);
-      setState(() { _qr = result; _qrImage = image; _secondsLeft = result.expiresInSeconds; });
+      final imageDataUri = await _qrApi.getDynamicImage(result.qrToken);
+      // Decode exactly once here — the countdown timer below triggers a
+      // rebuild every second, and decoding base64 inside build() on every
+      // one of those rebuilds was what caused the visible flicker.
+      final bytes = base64Decode(imageDataUri.split(',').last);
+      setState(() { _qr = result; _qrBytes = bytes; _secondsLeft = result.expiresInSeconds; });
       _timer?.cancel();
       _timer = Timer.periodic(const Duration(seconds: 1), (t) {
         if (_secondsLeft <= 0) { t.cancel(); return; }
@@ -46,7 +51,7 @@ class _RequestScreenState extends State<RequestScreen> {
   }
 
   void _reset() {
-    setState(() { _qr = null; _qrImage = null; _amountController.clear(); _noteController.clear(); });
+    setState(() { _qr = null; _qrBytes = null; _amountController.clear(); _noteController.clear(); });
   }
 
   @override
@@ -86,7 +91,7 @@ class _RequestScreenState extends State<RequestScreen> {
             : Center(
                 child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                   if (!expired) ...[
-                    Image.memory(base64Decode(_qrImage!.split(',').last), width: 220, height: 220),
+                    Image.memory(_qrBytes!, width: 220, height: 220, gaplessPlayback: true),
                     const SizedBox(height: 12),
                     Text('K${_qr!.amount.toStringAsFixed(2)}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
                     Text('Expires in ${_secondsLeft}s', style: const TextStyle(color: Colors.grey)),
