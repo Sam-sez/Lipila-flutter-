@@ -1,0 +1,53 @@
+name: lipila
+description: "Lipila — scan, confirm, done. Native Android client with real BLE Bong."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # Networking
+  dio: ^5.4.0
+
+  # Local session persistence (mirrors localStorage in the web app)
+  shared_preferences: ^2.2.2
+
+  # State management
+  provider: ^6.1.2
+
+  # QR scanning (camera) — Static/Dynamic QR
+  mobile_scanner: ^5.2.3
+
+  # Real biometric confirmation (Face/fingerprint) — replaces the web's
+  # simulated button with an actual OS-level prompt.
+  local_auth: ^2.3.0
+
+  # QR export as PDF
+  pdf: ^3.11.1
+  printing: ^5.13.2
+  path_provider: ^2.1.4
+
+  # Fonts matching the web design system (Sora + Inter)
+  google_fonts: ^6.2.1
+
+  # Bong: real BLE. Two plugins because no single Flutter plugin reliably
+  # does both central (scan) and peripheral (advertise) roles — see
+  # lib/ble/bong_ble_service.dart for why both are needed together.
+  flutter_blue_plus: ^1.34.5       # central role: scanning for nearby devices
+  flutter_ble_peripheral: ^1.2.6   # peripheral role: advertising this device
+
+  permission_handler: ^11.3.1
+  uuid: ^4.4.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

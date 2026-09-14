@@ -1,0 +1,20 @@
+# Flutter/Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Platform folders are NOT committed — CI regenerates android/ fresh on
+# every build via `flutter create` (see .github/workflows/build_apk.yml).
+# This avoids hand-maintained Gradle files going stale against whatever
+# Flutter/AGP version the runner has installed.
+android/
+ios/
+
+# IDE
+.idea/
+*.iml
+
+# macOS
+.DS_Store

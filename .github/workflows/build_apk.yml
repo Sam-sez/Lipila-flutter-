@@ -1,0 +1,95 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Generate fresh Android platform scaffolding
+        # We don't commit android/ to this repo — flutter create generates
+        # a scaffold matching whatever Flutter/Gradle/AGP versions are
+        # current on the runner, avoiding hand-maintained Gradle files that
+        # could go stale. Only the android/ folder is taken from it; our
+        # real lib/ and pubspec.yaml (already checked out) are untouched.
+        run: |
+          flutter create --platforms=android --org com.lipila --project-name lipila /tmp/scaffold
+          rm -rf android
+          cp -r /tmp/scaffold/android ./android
+
+      - name: Patch AndroidManifest.xml (permissions + app label)
+        # Bong's BLE permissions, camera for QR scanning, and biometric
+        # confirmation all need explicit manifest declarations that
+        # `flutter create` has no way to know to add on its own. A failed
+        # build would NOT surface a missing permission — that only shows
+        # up at runtime on a real device — so this step is the one place
+        # in the whole pipeline that can't be caught by "did it compile."
+        run: |
+          python3 - <<'PYEOF'
+          import re
+
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path) as f:
+              content = f.read()
+
+          permissions = """
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.CAMERA"/>
+              <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" android:usesPermissionFlags="neverForLocation"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
+              <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
+              <uses-feature android:name="android.hardware.camera" android:required="false"/>
+          """
+
+          # Insert right after the opening <manifest ...> tag.
+          content = re.sub(
+              r'(<manifest[^>]*>)',
+              r'\1' + permissions,
+              content,
+              count=1,
+          )
+
+          # Fix the default "lipila" label to the real app name.
+          content = content.replace('android:label="lipila"', 'android:label="Lipila"')
+
+          with open(path, "w") as f:
+              f.write(content)
+
+          print("--- Patched AndroidManifest.xml ---")
+          print(content)
+          PYEOF
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze (non-blocking — surfaces warnings without failing the build)
+        run: flutter analyze || true
+
+      - name: Build release APK
+        run: |
+          flutter build apk --release \
+            --dart-define=API_BASE_URL=https://lipila.vercel.app/api
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lipila-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
