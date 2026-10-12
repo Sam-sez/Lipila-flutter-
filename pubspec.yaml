@@ -44,6 +44,11 @@ dependencies:
   permission_handler: ^11.3.1
   uuid: ^4.4.2
 
+  # Device info for diagnostics screen (SDK level, manufacturer, model).
+  # Used only in lib/screens/diagnostics_screen.dart to log the Android
+  # SDK int so hypothesis H1 (location-on-SDK31) can be confirmed from the log.
+  device_info_plus: ^10.1.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

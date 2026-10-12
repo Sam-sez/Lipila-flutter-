@@ -20,76 +20,119 @@ jobs:
         with:
           channel: 'stable'
 
+      # ── Print tool versions ────────────────────────────────────────────
+      # These lines appear in the CI log so you can tell exactly which
+      # Flutter/Dart/plugin versions produced any given APK.
+      - name: Print versions
+        run: |
+          echo "=== Flutter version ==="
+          flutter --version
+          echo "=== Dart version ==="
+          dart --version
+          echo "=== Java version ==="
+          java -version
+          echo "=== BUILD_ID: run${{ github.run_number }} ==="
+
+      # ── Generate android/ scaffold ─────────────────────────────────────
+      # android/ is not committed — flutter create regenerates it so Gradle/
+      # AGP versions always match the runner's Flutter SDK, not a hand-
+      # maintained file that could go stale.
       - name: Generate fresh Android platform scaffolding
-        # We don't commit android/ to this repo — flutter create generates
-        # a scaffold matching whatever Flutter/Gradle/AGP versions are
-        # current on the runner, avoiding hand-maintained Gradle files that
-        # could go stale. Only the android/ folder is taken from it; our
-        # real lib/ and pubspec.yaml (already checked out) are untouched.
         run: |
           flutter create --platforms=android --org com.lipila --project-name lipila /tmp/scaffold
           rm -rf android
           cp -r /tmp/scaffold/android ./android
 
-      - name: Patch AndroidManifest.xml (permissions + app label)
-        # Bong's BLE permissions, camera for QR scanning, and biometric
-        # confirmation all need explicit manifest declarations that
-        # `flutter create` has no way to know to add on its own. A failed
-        # build would NOT surface a missing permission — that only shows
-        # up at runtime on a real device — so this step is the one place
-        # in the whole pipeline that can't be caught by "did it compile."
-        run: |
-          python3 - <<'PYEOF'
-          import re
+      # ── Patch manifest ────────────────────────────────────────────────
+      # Uses the shared script also used for local builds so they cannot drift.
+      # The script exits non-zero if the patch didn't apply or any permission
+      # is missing — this is the only CI step that can catch a missing permission
+      # before the APK lands on a device.
+      - name: Patch AndroidManifest.xml
+        run: python3 tool/patch_manifest.py
 
-          path = "android/app/src/main/AndroidManifest.xml"
-          with open(path) as f:
-              content = f.read()
-
-          permissions = """
-              <uses-permission android:name="android.permission.INTERNET"/>
-              <uses-permission android:name="android.permission.CAMERA"/>
-              <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" android:usesPermissionFlags="neverForLocation"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
-              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
-              <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
-              <uses-feature android:name="android.hardware.camera" android:required="false"/>
-          """
-
-          # Insert right after the opening <manifest ...> tag.
-          content = re.sub(
-              r'(<manifest[^>]*>)',
-              r'\1' + permissions,
-              content,
-              count=1,
-          )
-
-          # Fix the default "lipila" label to the real app name.
-          content = content.replace('android:label="lipila"', 'android:label="Lipila"')
-
-          with open(path, "w") as f:
-              f.write(content)
-
-          print("--- Patched AndroidManifest.xml ---")
-          print(content)
-          PYEOF
-
+      # ── Install dependencies ──────────────────────────────────────────
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Analyze (non-blocking — surfaces warnings without failing the build)
+      # ── Print plugin versions from pubspec.lock ───────────────────────
+      - name: Print plugin versions (pubspec.lock)
+        run: |
+          echo "=== Key plugin versions from pubspec.lock ==="
+          grep -A1 "flutter_blue_plus\|flutter_ble_peripheral\|permission_handler\|mobile_scanner\|device_info_plus" pubspec.lock || true
+
+      # ── Analyze ───────────────────────────────────────────────────────
+      - name: Analyze (non-blocking)
         run: flutter analyze || true
 
+      # ── Build DEBUG APK ───────────────────────────────────────────────
+      - name: Build debug APK
+        run: |
+          flutter build apk --debug \
+            --dart-define=API_BASE_URL=https://lipila.vercel.app/api \
+            --dart-define=BUILD_ID=run${{ github.run_number }}
+
+      # ── Build RELEASE APK ─────────────────────────────────────────────
       - name: Build release APK
         run: |
           flutter build apk --release \
-            --dart-define=API_BASE_URL=https://lipila.vercel.app/api
+            --dart-define=API_BASE_URL=https://lipila.vercel.app/api \
+            --dart-define=BUILD_ID=run${{ github.run_number }}
 
-      - name: Upload APK artifact
+      # ── SDK / permission diagnostics via aapt2 ────────────────────────
+      # Verifies the manifest patch actually landed in the compiled APK.
+      # CAMERA, BLUETOOTH_SCAN, BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT
+      # must all appear; if any are missing the step fails the build.
+      - name: Verify APK permissions (aapt2 dump)
+        run: |
+          ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          AAPT2=$(find "$ANDROID_SDK_ROOT/build-tools" -name "aapt2" | sort -V | tail -1)
+          echo "Using aapt2: $AAPT2"
+
+          for APK in \
+            build/app/outputs/flutter-apk/app-debug.apk \
+            build/app/outputs/flutter-apk/app-release.apk; do
+
+            echo ""
+            echo "=== $APK ==="
+            "$AAPT2" dump permissions "$APK"
+
+            for PERM in \
+              android.permission.CAMERA \
+              android.permission.BLUETOOTH_SCAN \
+              android.permission.BLUETOOTH_ADVERTISE \
+              android.permission.BLUETOOTH_CONNECT; do
+              if "$AAPT2" dump permissions "$APK" | grep -q "$PERM"; then
+                echo "  OK: $PERM"
+              else
+                echo "  MISSING: $PERM  <-- BUILD FAILURE" >&2
+                exit 1
+              fi
+            done
+          done
+
+      # ── Check R8 ran on release ───────────────────────────────────────
+      # If the mapping directory is absent, R8 did not run and release is
+      # unminified — unexpected and potentially masking shrink bugs.
+      - name: Check R8 ran (release)
+        run: |
+          MAPPING_DIR="build/app/outputs/mapping/release"
+          if [ -d "$MAPPING_DIR" ] && [ "$(ls -A "$MAPPING_DIR")" ]; then
+            echo "R8 OK — mapping files present in $MAPPING_DIR"
+            ls -lh "$MAPPING_DIR"
+          else
+            echo "WARNING: no mapping files in $MAPPING_DIR — R8 may not have run"
+            echo "This means shrink/obfuscation is OFF. If you add proguard rules, verify they are wired."
+          fi
+
+      # ── Upload both APKs ──────────────────────────────────────────────
+      # Artifact name is lipila-apks; both debug and release are zipped together
+      # so you can install whichever one you need without two separate downloads.
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lipila-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: lipila-apks
+          path: |
+            build/app/outputs/flutter-apk/app-debug.apk
+            build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
