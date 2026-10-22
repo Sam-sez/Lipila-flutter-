@@ -35,32 +35,34 @@ flutter build apk --release --dart-define=API_BASE_URL=https://lipila.vercel.app
 | File | Purpose |
 |---|---|
 | `lib/diagnostics/app_log.dart` | Ring-buffer log (500 lines). `AppLog.add(tag, msg)` from anywhere. |
-| `lib/ble/bong_ble_service.dart` | THE file: permissions + advertise + scan + BLE diagnostics helpers. |
+| `lib/nfc/bong_nfc_service.dart` | THE file: NFC availability, HCE emulation (payee), NFC reading (payer). |
 | `lib/screens/diagnostics_screen.dart` | Tap-to-test UI; reachable via bug icon in Bong screen. |
-| `lib/screens/bong_screen.dart` | Bong payment flow UI + state machine. |
+| `lib/screens/bong_screen.dart` | Bong payment flow — role picker, paying view, receiving view. |
 | `lib/main.dart` | Entry point; AppLog init + global error capture. |
 | `tool/patch_manifest.py` | Single source of truth for AndroidManifest permissions. |
 | `.github/workflows/build_apk.yml` | CI: debug+release, BUILD_ID stamp, version print, aapt2 check. |
 | `DEBUG_LOG.md` | Iteration-by-iteration evidence log. Update after every build+test cycle. |
 
-## BLE plugins
+## NFC plugins (replaced BLE in iteration 2)
 
-Two are needed because no single Flutter plugin does both roles reliably:
-- `flutter_blue_plus ^1.34.5` — central role (scan for nearby devices)
-- `flutter_ble_peripheral ^1.2.6` — peripheral role (advertise this device)
+Two plugins for the two asymmetric roles:
+- `nfc_manager ^3.3.0` — PAYER role (NFC reader). Android + iOS read support.
+- `flutter_nfc_hce ^1.0.5` — PAYEE role (HCE card emulation). Android-only by platform design.
 
-API notes for these specific versions:
-- `AdvertisementData.serviceUuids` is `List<Guid>` (changed from `List<String>` at 1.28.0). `.toString()` on a Guid returns the UUID string.
-- Use `FlutterBluePlus.scanResults` for continuous 60-s scan (keeps previous results). Use `onScanResults` if you want a clean slate each scan cycle.
-- `AdvertiseData(serviceUuid: token, includeDeviceName: false)` is correct for flutter_ble_peripheral 1.2.6.
+Key facts:
+- NFC has no runtime permission dialog — `android.permission.NFC` is granted at install time.
+- `android.hardware.nfc` and `android.hardware.nfc.hce` are declared `required=false` so the APK installs on non-NFC devices. The app degrades gracefully to QR scan.
+- The `flutter_nfc_hce` plugin contributes its own `<service>` and `<meta-data>` blocks via manifest merge. Do NOT duplicate them in `patch_manifest.py`.
+- iOS: reader role works (iPhone 7+, iOS 13+). HCE emulator role is blocked by Apple — Bong stays Android-only.
+
+## Bong UX (asymmetric NFC)
+
+- PAYEE taps **I'm receiving** → phone emits session token as NDEF text record via HCE.
+- PAYER taps **I'm paying** → phone enters NFC reader mode, waits for tap.
+- On tap: token is read → `/bong/reveal/{token}` → identity shown → payment confirmed.
+- Session expires after 60 s on both roles.
+- Devices without NFC see a clear message and are directed to QR scan.
 
 ## Permission setup
 
-See HANDOVER.md section 5 for the full analysis. Short version:
-- Android 12+ (SDK 31+): BLUETOOTH_ADVERTISE, BLUETOOTH_SCAN (neverForLocation), BLUETOOTH_CONNECT. No location needed.
-- Android ≤ 11 (SDK ≤ 30): also needs ACCESS_FINE_LOCATION + device Location switch on.
-- The code currently requests `locationWhenInUse` on all SDK levels — this is hypothesis H1 (may cause failure on SDK 31 if location isn't in the manifest). The diagnostics log will confirm.
-
-## Hypotheses (ranked, all unconfirmed)
-
-See HANDOVER.md section 6. Do not change BLE logic until a log confirms which one is true.
+NFC: install-time only, no runtime dialog. `BongNfcService.requestPermissions()` checks `NfcAvailability` and returns a result the UI can act on (available / disabled / notSupported).

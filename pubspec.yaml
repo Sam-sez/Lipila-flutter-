@@ -1,5 +1,5 @@
 name: lipila
-description: "Lipila — scan, confirm, done. Native Android client with real BLE Bong."
+description: "Lipila — scan, confirm, done. Native Android client with NFC Bong."
 publish_to: 'none'
 version: 0.1.0+1
 
@@ -14,17 +14,16 @@ dependencies:
   # Networking
   dio: ^5.4.0
 
-  # Local session persistence (mirrors localStorage in the web app)
+  # Local session persistence
   shared_preferences: ^2.2.2
 
   # State management
   provider: ^6.1.2
 
-  # QR scanning (camera) — Static/Dynamic QR
+  # QR scanning (camera) — fallback for devices without NFC
   mobile_scanner: ^5.2.3
 
-  # Real biometric confirmation (Face/fingerprint) — replaces the web's
-  # simulated button with an actual OS-level prompt.
+  # Biometric confirmation
   local_auth: ^2.3.0
 
   # QR export as PDF
@@ -32,21 +31,29 @@ dependencies:
   printing: ^5.13.2
   path_provider: ^2.1.4
 
-  # Fonts matching the web design system (Sora + Inter)
+  # Fonts
   google_fonts: ^6.2.1
 
-  # Bong: real BLE. Two plugins because no single Flutter plugin reliably
-  # does both central (scan) and peripheral (advertise) roles — see
-  # lib/ble/bong_ble_service.dart for why both are needed together.
-  flutter_blue_plus: ^1.34.5       # central role: scanning for nearby devices
-  flutter_ble_peripheral: ^1.2.6   # peripheral role: advertising this device
+  # ── Bong: NFC asymmetric proximity payment ──────────────────────────────
+  # Two plugins for the two roles:
+  #
+  #   nfc_manager   — PAYER role: reads the NFC tag the payee's phone emits.
+  #                   Supports Android and iOS (iOS read-only, which is fine
+  #                   since Bong is Android-only for the emulator role).
+  #
+  #   flutter_nfc_hce — PAYEE role: makes this Android device emulate an NFC
+  #                   card via Host Card Emulation (HCE). Android-only by
+  #                   platform design; Apple locks HCE to Apple Pay.
+  #
+  # Devices without NFC fall back to QR scan automatically — the UI checks
+  # NfcAvailability at startup and shows a clear message if NFC is absent.
+  nfc_manager: ^3.3.0
+  flutter_nfc_hce: ^1.0.5
 
   permission_handler: ^11.3.1
   uuid: ^4.4.2
 
   # Device info for diagnostics screen (SDK level, manufacturer, model).
-  # Used only in lib/screens/diagnostics_screen.dart to log the Android
-  # SDK int so hypothesis H1 (location-on-SDK31) can be confirmed from the log.
   device_info_plus: ^10.1.0
 
 dev_dependencies:

@@ -59,7 +59,7 @@ jobs:
       - name: Print plugin versions (pubspec.lock)
         run: |
           echo "=== Key plugin versions from pubspec.lock ==="
-          grep -A1 "flutter_blue_plus\|flutter_ble_peripheral\|permission_handler\|mobile_scanner\|device_info_plus" pubspec.lock || true
+          grep -A1 "nfc_manager\|flutter_nfc_hce\|permission_handler\|mobile_scanner\|device_info_plus" pubspec.lock || true
 
       # ── Analyze ───────────────────────────────────────────────────────
       - name: Analyze (non-blocking)
@@ -81,8 +81,7 @@ jobs:
 
       # ── SDK / permission diagnostics via aapt2 ────────────────────────
       # Verifies the manifest patch actually landed in the compiled APK.
-      # CAMERA, BLUETOOTH_SCAN, BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT
-      # must all appear; if any are missing the step fails the build.
+      # CAMERA and NFC must appear; if either is missing the step fails.
       - name: Verify APK permissions (aapt2 dump)
         run: |
           ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
@@ -99,9 +98,7 @@ jobs:
 
             for PERM in \
               android.permission.CAMERA \
-              android.permission.BLUETOOTH_SCAN \
-              android.permission.BLUETOOTH_ADVERTISE \
-              android.permission.BLUETOOTH_CONNECT; do
+              android.permission.NFC; do
               if "$AAPT2" dump permissions "$APK" | grep -q "$PERM"; then
                 echo "  OK: $PERM"
               else
