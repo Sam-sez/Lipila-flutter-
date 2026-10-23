@@ -5,7 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 import '../diagnostics/app_log.dart';
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────��[...]
 // BongNfcService
 //
 // NFC transport layer for the Bong proximity payment feature.
@@ -18,7 +18,7 @@ import '../diagnostics/app_log.dart';
 // NfcAvailability enum values in 4.x:
 //   NfcAvailability.enabled      — NFC on and ready
 //   NfcAvailability.disabled     — hardware present, NFC off in settings
-//   NfcAvailability.notSupported — no NFC hardware
+//   NfcAvailability.unsupported  — no NFC hardware
 //
 // ASYMMETRIC design:
 //   PAYEE  → startEmulating(token): sends token to the native BongHceService
@@ -34,7 +34,7 @@ import '../diagnostics/app_log.dart';
 //   Every Flutter HCE plugin on pub.dev breaks on current Gradle versions.
 //   The Kotlin service (~130 lines) is injected directly, giving us full
 //   control without third-party Gradle dependency risk.
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────�[...]
 
 /// NFC state — own enum so callers never import nfc_manager directly.
 enum NfcAvailabilityState {
@@ -94,8 +94,10 @@ class BongNfcService {
           return NfcAvailabilityState.available;
         case NfcAvailability.disabled:
           return NfcAvailabilityState.disabled;
-        case NfcAvailability.notSupported:
+        case NfcAvailability.unsupported:
           return NfcAvailabilityState.notSupported;
+        default:
+          return NfcAvailabilityState.unknown;
       }
     } catch (e, st) {
       AppLog.add('NFC', 'checkAvailability error: $e');
@@ -120,7 +122,7 @@ class BongNfcService {
     }
   }
 
-  // ─── Permissions ──────────────────────────────────────────────────────────
+  // ─── Permissions ────────────────────────────────────────────────────────
 
   /// NFC has no runtime permission dialog — the manifest permission is granted
   /// at install time. This checks availability and returns a result the UI
@@ -213,38 +215,41 @@ class BongNfcService {
       _isReading = true;
       AppLog.add('NFC', 'startReading: opening NfcManager session');
 
-      await NfcManager.instance.startSession(
-        pollingOptions: {NfcPollingOption.iso14443},
-        onDiscovered: (NfcTag tag) async {
-          AppLog.add('NFC', 'tag discovered');
-          try {
-            final token = _extractToken(tag);
-            if (token == null) {
-              const msg =
-                  'Tag found but no Bong session token — wrong device tapped?';
-              AppLog.add('NFC', msg);
-              onError(msg);
-              return;
+      try {
+        await NfcManager.instance.startSession(
+          pollingOptions: {NfcPollingOption.iso14443},
+          onDiscovered: (NfcTag tag) async {
+            AppLog.add('NFC', 'tag discovered');
+            try {
+              final token = _extractToken(tag);
+              if (token == null) {
+                const msg =
+                    'Tag found but no Bong session token — wrong device tapped?';
+                AppLog.add('NFC', msg);
+                onError(msg);
+                return;
+              }
+              AppLog.add('NFC', 'token extracted: $token');
+              await stopReading();
+              onTokenRead(token);
+            } on PlatformException catch (e) {
+              AppLog.add('NFC',
+                  'tag read PlatformException: code=${e.code} msg=${e.message}');
+              onError('Could not read NFC tag: ${e.message}');
+            } catch (e, st) {
+              AppLog.add('NFC', 'tag read error: type=${e.runtimeType} err=$e');
+              AppLog.add('NFC', 'stack: $st');
+              onError('Unexpected error reading NFC tag. Try again.');
             }
-            AppLog.add('NFC', 'token extracted: $token');
-            await stopReading();
-            onTokenRead(token);
-          } on PlatformException catch (e) {
-            AppLog.add('NFC',
-                'tag read PlatformException: code=${e.code} msg=${e.message}');
-            onError('Could not read NFC tag: ${e.message}');
-          } catch (e, st) {
-            AppLog.add('NFC', 'tag read error: type=${e.runtimeType} err=$e');
-            AppLog.add('NFC', 'stack: $st');
-            onError('Unexpected error reading NFC tag. Try again.');
-          }
-        },
-        onError: (e) async {
-          AppLog.add('NFC', 'NfcManager session error: $e');
-          _isReading = false;
-          onError('NFC session error. Please try again.');
-        },
-      );
+          },
+        );
+      } catch (e, st) {
+        AppLog.add('NFC', 'NfcManager session error: $e');
+        AppLog.add('NFC', 'stack: $st');
+        _isReading = false;
+        onError('NFC session error. Please try again.');
+      }
+
       AppLog.add('NFC', 'startReading: session open — waiting for tap');
     } on PlatformException catch (e) {
       _isReading = false;
