@@ -48,8 +48,8 @@ dependencies:
   #
   # Devices without NFC fall back to QR scan — the UI checks NfcAvailability
   # at startup and shows a clear message if NFC is absent.
-  nfc_manager: ^3.3.0
-  nfc_manager_ndef: ^1.0.0
+  nfc_manager: ^4.2.1
+  nfc_manager_ndef: ^1.1.0
 
   permission_handler: ^11.3.1
   uuid: ^4.4.2
