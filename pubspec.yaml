@@ -48,7 +48,7 @@ dependencies:
   # Devices without NFC fall back to QR scan automatically — the UI checks
   # NfcAvailability at startup and shows a clear message if NFC is absent.
   nfc_manager: ^3.3.0
-  flutter_nfc_hce: ^1.0.5
+  flutter_nfc_hce: ^0.1.8
 
   permission_handler: ^11.3.1
   uuid: ^4.4.2
