@@ -1,7 +1,6 @@
-import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:nfc_manager/nfc_manager.dart';
-import 'package:flutter_nfc_hce/flutter_nfc_hce.dart';
+import 'package:nfc_manager_ndef/nfc_manager_ndef.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 import '../diagnostics/app_log.dart';
@@ -9,32 +8,49 @@ import '../diagnostics/app_log.dart';
 // ─────────────────────────────────────────────────────────────────────────────
 // BongNfcService
 //
-// Replaces BongBleService entirely. Implements the same Bong protocol
-// (announce → candidates → reveal → pay) but over NFC instead of BLE.
+// Implements the Bong proximity-payment transport layer over NFC.
+// Replaces the former BLE implementation entirely.
 //
-// ASYMMETRIC design — one phone per role per session:
-//   PAYEE  → startEmulating(token) — phone acts as an NFC card (HCE).
-//            The session token is written as a plain-text NDEF record.
-//   PAYER  → startReading(onToken) — phone polls for an NFC tag.
-//            When it reads a token it calls onToken and stops.
+// ASYMMETRIC design:
+//   PAYEE  → startEmulating(token)
+//            Sends the session token to the native BongHceService (Kotlin)
+//            via MethodChannel. The Kotlin service emulates an NFC card using
+//            Android HCE, broadcasting the token as an NDEF Text record.
 //
-// Why asymmetric:
-//   Running both HCE and reader on the same device simultaneously causes radio
-//   contention and unreliable reads. The physical tap is the coordination step
-//   that replaces BLE's "scan for 60 s" window.
+//   PAYER  → startReading(onTokenRead, onError)
+//            Puts the phone in NFC reader mode via nfc_manager. When the
+//            payee's phone is tapped, the NDEF record is read, the UUID is
+//            extracted, and onTokenRead is called.
 //
-// Device support:
-//   NFC hardware is required for both roles. Devices without NFC fall back to
-//   QR scan (already implemented in scan_screen.dart). isNfcAvailable() lets
-//   the UI gate access before showing the Bong option.
+// WHY NO flutter_nfc_hce PLUGIN:
+//   Every Flutter HCE plugin on pub.dev (flutter_nfc_hce, nfc_host_card_emulation)
+//   is small, unverified, and breaks on Gradle version upgrades — confirmed in CI.
+//   Writing the native Kotlin service directly (< 100 lines) and wiring it via
+//   MethodChannel is more reliable and keeps the build under our control.
+//   The native files are injected into android/ by tool/patch_manifest.py.
 //
 // iOS:
-//   Reader role: supported (iPhone 7+, iOS 13+).
-//   Emulator role: NOT supported — Apple locks HCE to Apple Pay.
-//   Since Bong is Android-only by design this is acceptable.
+//   Reader role: works (iPhone 7+, iOS 13+).
+//   Emulator role: blocked by Apple — Bong stays Android-only.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Result returned by [BongNfcService.requestPermissions].
+/// Possible NFC states — more granular than bool so the UI gives actionable messages.
+enum NfcAvailabilityState {
+  /// NFC on and ready.
+  available,
+
+  /// NFC hardware present but disabled in settings.
+  disabled,
+
+  /// Device has no NFC hardware.
+  notSupported,
+
+  /// State could not be determined.
+  unknown,
+}
+
+/// Result of [BongNfcService.requestPermissions] — same shape as the old BLE
+/// result so bong_screen.dart call sites are unchanged.
 class BongNfcPermissionResult {
   final bool allGranted;
   final bool permanentlyDenied;
@@ -52,107 +68,82 @@ class BongNfcPermissionResult {
       .toList();
 }
 
-/// Possible NFC availability states — more granular than a plain bool so the
-/// UI can give the user an actionable message for each case.
-enum NfcAvailability {
-  /// NFC hardware present and switched on — ready to use.
-  available,
-
-  /// NFC hardware present but turned off in Android settings.
-  disabled,
-
-  /// Device has no NFC hardware at all.
-  notSupported,
-
-  /// Could not determine state (plugin error, unexpected platform).
-  unknown,
-}
-
 class BongNfcService {
   static const _uuid = Uuid();
-  final FlutterNfcHce _hce = FlutterNfcHce();
+
+  // MethodChannel to the native BongHceService (see tool/patch_manifest.py
+  // which injects the Kotlin source into android/ at build time).
+  static const _hceChannel = MethodChannel('com.lipila.bong/hce');
 
   bool _isEmulating = false;
   bool _isReading = false;
 
-  // ─── Public state flags ────────────────────────────────────────────────
   bool get isEmulating => _isEmulating;
   bool get isReading => _isReading;
 
-  // ─── Session token ─────────────────────────────────────────────────────
+  // ─── Token generation ───────────────────────────────────────────────────
+
   String generateSessionToken() => _uuid.v4();
 
-  // ─── NFC availability ──────────────────────────────────────────────────
+  // ─── NFC availability ───────────────────────────────────────────────────
 
-  /// Check whether NFC is available and switched on.
-  /// Always call this before showing the Bong entry point in the UI.
-  Future<NfcAvailability> checkAvailability() async {
+  /// Check NFC state. Call this before showing the Bong entry point.
+  Future<NfcAvailabilityState> checkAvailability() async {
     AppLog.add('NFC', 'checkAvailability called');
     try {
-      final available = await NfcManager.instance.isAvailable();
-      if (available) {
-        AppLog.add('NFC', 'availability: available');
-        return NfcAvailability.available;
+      final availability = await NfcManager.instance.checkAvailability();
+      AppLog.add('NFC', 'NfcManager.checkAvailability: $availability');
+      switch (availability) {
+        case NfcAvailability.available:
+          return NfcAvailabilityState.available;
+        case NfcAvailability.disabled:
+          return NfcAvailabilityState.disabled;
+        case NfcAvailability.notSupported:
+          return NfcAvailabilityState.notSupported;
       }
-      // isAvailable() returns false for both "no hardware" and "hardware off".
-      // Try the HCE plugin's isNfcEnabled to distinguish the two.
-      try {
-        final enabled = await _hce.isNfcEnabled();
-        if (enabled == false) {
-          AppLog.add('NFC', 'availability: disabled (NFC off in settings)');
-          return NfcAvailability.disabled;
-        }
-      } catch (_) {
-        // HCE plugin not available or threw — fall through to notSupported.
-      }
-      AppLog.add('NFC', 'availability: notSupported');
-      return NfcAvailability.notSupported;
     } catch (e, st) {
       AppLog.add('NFC', 'checkAvailability error: $e');
       AppLog.add('NFC', 'stack: $st');
-      return NfcAvailability.unknown;
+      return NfcAvailabilityState.unknown;
     }
   }
 
-  /// Whether this device supports HCE (card emulation — needed for payee role).
+  /// Whether HCE (card emulation) is available on this device.
+  /// Asks the native channel rather than guessing from the Dart side.
   Future<bool> isHceSupported() async {
     try {
-      final supported = await _hce.isNfcHceSupported();
-      AppLog.add('NFC', 'HCE supported: $supported');
-      return supported ?? false;
+      final result = await _hceChannel.invokeMethod<bool>('isHceSupported');
+      final supported = result ?? false;
+      AppLog.add('NFC', 'isHceSupported: $supported');
+      return supported;
+    } on PlatformException catch (e) {
+      AppLog.add('NFC', 'isHceSupported PlatformException: ${e.message}');
+      return false;
     } catch (e) {
       AppLog.add('NFC', 'isHceSupported error: $e');
       return false;
     }
   }
 
-  // ─── Permissions ───────────────────────────────────────────────────────
+  // ─── Permissions ────────────────────────────────────────────────────────
 
-  /// NFC itself does not require a runtime permission on Android — the
-  /// <uses-permission android:name="android.permission.NFC"/> in the manifest
-  /// is sufficient and is granted at install time. This method exists to:
-  ///   1. Log the current NFC availability state (useful for diagnostics).
-  ///   2. Keep the same call-site shape as the old BLE permission flow so
-  ///      bong_screen.dart changes are minimal.
+  /// NFC has no runtime permission dialog on Android — the manifest permission
+  /// is install-time only. This method checks NFC availability and returns
+  /// a result the UI can act on, keeping the same call shape as the old BLE flow.
   Future<BongNfcPermissionResult> requestPermissions() async {
-    AppLog.add('PERM', '=== NFC permission check ===');
-    // NFC has no runtime permission — check availability instead.
+    AppLog.add('PERM', '=== NFC availability check (no runtime dialog needed) ===');
     final avail = await checkAvailability();
-    final granted = avail == NfcAvailability.available;
-    final status =
-        granted ? PermissionStatus.granted : PermissionStatus.denied;
-    final statuses = {'NFC': status};
-
-    AppLog.add('PERM', 'NFC availability: $avail  treated as: $status');
-
+    final granted = avail == NfcAvailabilityState.available;
+    final status = granted ? PermissionStatus.granted : PermissionStatus.denied;
+    AppLog.add('PERM', 'NFC: $avail → treated as: $status');
     return BongNfcPermissionResult(
       allGranted: granted,
-      permanentlyDenied: avail == NfcAvailability.notSupported,
-      statuses: statuses,
+      permanentlyDenied: avail == NfcAvailabilityState.notSupported,
+      statuses: {'NFC': status},
     );
   }
 
-  /// Opens OS app settings — used when user must enable NFC manually.
+  /// Open OS settings — for when the user needs to enable NFC manually.
   Future<void> openSettings() async {
     AppLog.add('NFC', 'openSettings called');
     try {
@@ -162,25 +153,19 @@ class BongNfcService {
     }
   }
 
-  // ─── PAYEE ROLE: HCE emulation ─────────────────────────────────────────
+  // ─── PAYEE ROLE: HCE emulation ──────────────────────────────────────────
 
-  /// Start advertising [sessionToken] as an NDEF text record via HCE.
-  /// The payer's phone reads this token when they tap.
-  ///
-  /// [persistMessage] = false ensures the HCE advertisement stops cleanly
-  /// when [stopEmulating] is called and does not survive app restarts.
+  /// Tell the native BongHceService to start emulating [sessionToken] as an
+  /// NDEF Text record. The payer's phone reads this when they tap.
   Future<void> startEmulating(String sessionToken) async {
     AppLog.add('NFC', 'startEmulating token=$sessionToken');
     try {
-      final result = await _hce.startNfcHce(
-        sessionToken,
-        mimeType: 'text/plain',
-        persistMessage: false,
-      );
+      await _hceChannel.invokeMethod<void>('startHce', {'token': sessionToken});
       _isEmulating = true;
-      AppLog.add('NFC', 'startEmulating OK result=$result');
+      AppLog.add('NFC', 'startEmulating OK');
     } on PlatformException catch (e) {
-      AppLog.add('NFC', 'startEmulating PlatformException: code=${e.code} msg=${e.message}');
+      AppLog.add('NFC',
+          'startEmulating PlatformException: code=${e.code} msg=${e.message}');
       AppLog.add('NFC', 'details: ${e.details}');
       throw Exception(
         'Could not start NFC card emulation. '
@@ -197,12 +182,11 @@ class BongNfcService {
     if (!_isEmulating) return;
     AppLog.add('NFC', 'stopEmulating called');
     try {
-      await _hce.stopNfcHce();
+      await _hceChannel.invokeMethod<void>('stopHce');
       _isEmulating = false;
       AppLog.add('NFC', 'stopEmulating OK');
     } on PlatformException catch (e) {
-      // Log but don't rethrow — stopEmulating is always called in cleanup
-      // paths where throwing would leave state inconsistent.
+      // Non-fatal — always called from cleanup paths.
       AppLog.add('NFC', 'stopEmulating PlatformException (non-fatal): ${e.message}');
       _isEmulating = false;
     } catch (e) {
@@ -213,68 +197,65 @@ class BongNfcService {
 
   // ─── PAYER ROLE: NFC reader ─────────────────────────────────────────────
 
-  /// Begin scanning for an NFC tap. When a tag is read, [onTokenRead] is
-  /// called with the session token and scanning stops automatically.
-  ///
-  /// [onError] is called for any read failure (bad tag format, unsupported
-  /// tag type, OS-level error). Scanning continues after an error — the
-  /// user can try tapping again.
+  /// Enter NFC reader mode. [onTokenRead] is called once with the session token
+  /// when the payee's phone is tapped. [onError] is called for recoverable
+  /// failures (bad tag, no NDEF, wrong format) — scanning continues after
+  /// an error so the user can try tapping again.
   Future<void> startReading({
     required void Function(String token) onTokenRead,
     required void Function(String message) onError,
   }) async {
     AppLog.add('NFC', 'startReading called');
     try {
-      final available = await NfcManager.instance.isAvailable();
-      if (!available) {
-        const msg = 'NFC is not available on this device or is turned off.';
+      final availability = await NfcManager.instance.checkAvailability();
+      if (availability != NfcAvailability.available) {
+        const msg = 'NFC is not available or is turned off.';
         AppLog.add('NFC', 'startReading aborted: $msg');
         onError(msg);
         return;
       }
 
       _isReading = true;
-      AppLog.add('NFC', 'startReading: NfcManager.instance.startSession');
+      AppLog.add('NFC', 'startReading: starting NfcManager session');
 
       await NfcManager.instance.startSession(
+        pollingOptions: {NfcPollingOption.iso14443},
         onDiscovered: (NfcTag tag) async {
-          AppLog.add('NFC', 'tag discovered: techList=${tag.data.keys.toList()}');
+          AppLog.add('NFC', 'tag discovered');
           try {
-            final token = _extractTokenFromTag(tag);
+            final token = _extractToken(tag);
             if (token == null) {
               const msg =
-                  'Tag found but no Bong session token in it — wrong device tapped?';
+                  'Tag found but no Bong session token — wrong device tapped?';
               AppLog.add('NFC', msg);
               onError(msg);
               return;
             }
             AppLog.add('NFC', 'token extracted: $token');
-            // Stop before calling onTokenRead so we don't keep the session
-            // open while the payment flow runs.
             await stopReading();
             onTokenRead(token);
           } on PlatformException catch (e) {
-            AppLog.add('NFC', 'tag read PlatformException: code=${e.code} msg=${e.message}');
+            AppLog.add('NFC',
+                'tag read PlatformException: code=${e.code} msg=${e.message}');
             onError('Could not read NFC tag: ${e.message}');
           } catch (e, st) {
-            AppLog.add('NFC', 'tag read error: type=${e.runtimeType} err=$e');
+            AppLog.add('NFC',
+                'tag read error: type=${e.runtimeType} err=$e');
             AppLog.add('NFC', 'stack: $st');
-            onError('Unexpected error reading NFC tag.');
+            onError('Unexpected error reading NFC tag. Try again.');
           }
         },
         onError: (e) async {
-          // onError fires for session-level failures (e.g. NFC turned off
-          // mid-session), not per-tag errors — those go to onDiscovered above.
           AppLog.add('NFC', 'NfcManager session error: $e');
           _isReading = false;
           onError('NFC session error. Please try again.');
         },
       );
-
-      AppLog.add('NFC', 'startReading: session started OK — waiting for tap');
+      AppLog.add('NFC', 'startReading: session open — waiting for tap');
     } on PlatformException catch (e) {
       _isReading = false;
-      AppLog.add('NFC', 'startReading PlatformException: code=${e.code} msg=${e.message}');
+      AppLog.add('NFC',
+          'startReading PlatformException: code=${e.code} msg=${e.message}');
       throw Exception('Could not start NFC reader. Is NFC on? (${e.message})');
     } catch (e, st) {
       _isReading = false;
@@ -300,81 +281,58 @@ class BongNfcService {
     }
   }
 
-  // ─── Stop everything ───────────────────────────────────────────────────
-
   Future<void> stopEverything() async {
     AppLog.add('NFC', 'stopEverything called');
     await stopEmulating();
     await stopReading();
   }
 
-  // ─── Internal ──────────────────────────────────────────────────────────
+  // ─── NDEF token extraction ──────────────────────────────────────────────
 
-  /// Extract the Bong session token from an NFC tag.
+  /// Extract the Bong session token from a discovered NFC tag.
   ///
-  /// The payee's phone emits a plain-text NDEF record containing only the
-  /// UUID token. We look for the first NDEF text record and return its text.
-  /// Returns null if no usable token is found so the caller can surface a
-  /// clear "wrong device" message rather than crashing.
-  String? _extractTokenFromTag(NfcTag tag) {
+  /// Uses nfc_manager_ndef's [Ndef.from] which handles the NDEF record
+  /// parsing correctly across tag types. Returns null if the tag contains
+  /// no valid UUID token so the caller can surface a clear message.
+  String? _extractToken(NfcTag tag) {
     try {
-      // nfc_manager represents NDEF data under the 'ndef' key.
-      final ndefData = tag.data['ndef'];
-      if (ndefData == null) {
-        AppLog.add('NFC', '_extractToken: no ndef data in tag');
+      final ndef = Ndef.from(tag);
+      if (ndef == null) {
+        AppLog.add('NFC', '_extractToken: tag is not NDEF-compatible');
         return null;
       }
 
-      final cachedMessage = ndefData['cachedMessage'];
-      if (cachedMessage == null) {
-        AppLog.add('NFC', '_extractToken: no cachedMessage');
+      final message = ndef.cachedMessage;
+      if (message == null || message.records.isEmpty) {
+        AppLog.add('NFC', '_extractToken: no cached NDEF message');
         return null;
       }
 
-      final records = cachedMessage['records'] as List?;
-      if (records == null || records.isEmpty) {
-        AppLog.add('NFC', '_extractToken: empty records list');
-        return null;
-      }
+      for (final record in message.records) {
+        // NDEF Text Record TNF=0x01, type=0x54 ('T')
+        // Payload: [statusByte][languageCode][text]
+        final payload = record.payload;
+        if (payload.isEmpty) continue;
 
-      for (final record in records) {
-        final payload = record['payload'];
-        if (payload == null) continue;
-
-        // NDEF Text Record payload: first byte is status byte (language code
-        // length), followed by the language code, then the actual text.
-        // We strip the header and return the text portion.
-        List<int> bytes;
-        if (payload is List) {
-          bytes = List<int>.from(payload);
-        } else {
-          AppLog.add('NFC', '_extractToken: unexpected payload type ${payload.runtimeType}');
-          continue;
-        }
-
-        if (bytes.isEmpty) continue;
-
-        final statusByte = bytes[0];
+        final statusByte = payload[0];
         final languageCodeLength = statusByte & 0x3F;
         final textStart = 1 + languageCodeLength;
 
-        if (textStart >= bytes.length) continue;
+        if (textStart >= payload.length) continue;
 
-        final text = String.fromCharCodes(bytes.sublist(textStart));
-        AppLog.add('NFC', '_extractToken: extracted text="$text"');
+        final text = String.fromCharCodes(payload.sublist(textStart));
+        AppLog.add('NFC', '_extractToken: record text="$text"');
 
-        // Validate it looks like a UUID before treating it as a token.
+        // Validate UUID format before treating as a Bong token.
         final uuidRegex = RegExp(
           r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
           caseSensitive: false,
         );
-        if (uuidRegex.hasMatch(text)) {
-          return text;
-        }
-        AppLog.add('NFC', '_extractToken: text does not look like a UUID — skipping');
+        if (uuidRegex.hasMatch(text)) return text;
+        AppLog.add('NFC', '_extractToken: not a UUID — skipping');
       }
 
-      AppLog.add('NFC', '_extractToken: no valid UUID token found in any record');
+      AppLog.add('NFC', '_extractToken: no valid UUID token found');
       return null;
     } catch (e, st) {
       AppLog.add('NFC', '_extractToken error: $e');

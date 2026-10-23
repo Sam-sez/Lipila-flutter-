@@ -43,7 +43,7 @@ class _BongScreenState extends State<BongScreen> {
   final _nfc = BongNfcService();
 
   _BongRole _role = _BongRole.none;
-  NfcAvailability _nfcAvail = NfcAvailability.unknown;
+  NfcAvailabilityState _nfcAvail = NfcAvailabilityState.unknown;
   bool _checkingAvailability = true;
 
   String? _mySessionToken;
@@ -243,7 +243,7 @@ class _BongScreenState extends State<BongScreen> {
 
   Widget _buildBody() {
     // ── NFC unavailable states ───────────────────────────────────────────
-    if (_nfcAvail == NfcAvailability.notSupported) {
+    if (_nfcAvail == NfcAvailabilityState.notSupported) {
       return _NfcUnavailableBanner(
         title: 'NFC not supported',
         message:
@@ -254,7 +254,7 @@ class _BongScreenState extends State<BongScreen> {
       );
     }
 
-    if (_nfcAvail == NfcAvailability.disabled) {
+    if (_nfcAvail == NfcAvailabilityState.disabled) {
       return _NfcUnavailableBanner(
         title: 'NFC is turned off',
         message: 'Enable NFC in your device settings to use Bong.',

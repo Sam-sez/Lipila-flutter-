@@ -35,20 +35,21 @@ dependencies:
   google_fonts: ^6.2.1
 
   # ── Bong: NFC asymmetric proximity payment ──────────────────────────────
-  # Two plugins for the two roles:
+  # Reader role (payer): nfc_manager reads the NDEF tag the payee emits.
+  #   nfc_manager_ndef adds the Ndef helper used to parse NDEF records.
   #
-  #   nfc_manager   — PAYER role: reads the NFC tag the payee's phone emits.
-  #                   Supports Android and iOS (iOS read-only, which is fine
-  #                   since Bong is Android-only for the emulator role).
+  # Emulator role (payee): implemented via a native Kotlin HostApduService
+  #   written directly into android/ by the CI patch step. No third-party
+  #   plugin needed — every Flutter HCE plugin on pub.dev is unmaintained
+  #   and breaks on Gradle version upgrades (confirmed: flutter_nfc_hce
+  #   fails checkAarMetadata on stable Flutter CI runners as of 2026).
+  #   The native service is invoked through a Flutter MethodChannel defined
+  #   in lib/nfc/bong_nfc_service.dart.
   #
-  #   flutter_nfc_hce — PAYEE role: makes this Android device emulate an NFC
-  #                   card via Host Card Emulation (HCE). Android-only by
-  #                   platform design; Apple locks HCE to Apple Pay.
-  #
-  # Devices without NFC fall back to QR scan automatically — the UI checks
-  # NfcAvailability at startup and shows a clear message if NFC is absent.
+  # Devices without NFC fall back to QR scan — the UI checks NfcAvailability
+  # at startup and shows a clear message if NFC is absent.
   nfc_manager: ^3.3.0
-  flutter_nfc_hce: ^0.1.8
+  nfc_manager_ndef: ^1.0.0
 
   permission_handler: ^11.3.1
   uuid: ^4.4.2

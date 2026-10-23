@@ -59,7 +59,7 @@ jobs:
       - name: Print plugin versions (pubspec.lock)
         run: |
           echo "=== Key plugin versions from pubspec.lock ==="
-          grep -A1 "nfc_manager\|flutter_nfc_hce\|permission_handler\|mobile_scanner\|device_info_plus" pubspec.lock || true
+          grep -A1 "nfc_manager\|nfc_manager_ndef\|permission_handler\|mobile_scanner\|device_info_plus" pubspec.lock || true
 
       # ── Analyze ───────────────────────────────────────────────────────
       - name: Analyze (non-blocking)
