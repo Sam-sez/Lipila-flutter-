@@ -17,9 +17,9 @@ import argparse
 import os
 import sys
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 # 1. Manifest permissions
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 REQUIRED_MANIFEST_TOKENS = [
     'android.permission.INTERNET',
@@ -47,7 +47,7 @@ PERMISSIONS_BLOCK = """
         android:required="false"/>
     <uses-feature android:name="android.hardware.camera"
         android:required="false"/>
-"""
+ """
 
 # HCE service declaration — goes inside <application> just before </application>.
 # AID D2760000850101 is the NFC Forum NDEF Application ID, which is what
@@ -69,7 +69,7 @@ HCE_SERVICE_BLOCK = """
                 android:name="android.nfc.cardemulation.host_apdu_service"
                 android:resource="@xml/bong_apdu_service"/>
         </service>
-"""
+ """
 
 
 def patch_manifest(android_dir: str) -> None:
@@ -123,8 +123,44 @@ def patch_manifest(android_dir: str) -> None:
     print("--- Manifest verification: all required tokens present ---")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. BongHceService.kt
+# ────────────────────────────────────────────────────────────────
+# 2. App strings resource
+# ─────────────────────────────────────────��──────────────────────
+
+DEFAULT_STRINGS_XML = """<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Lipila</string>
+</resources>
+"""
+
+
+def write_app_strings(android_dir: str) -> None:
+    values_dir = os.path.join(android_dir, 'app', 'src', 'main', 'res', 'values')
+    os.makedirs(values_dir, exist_ok=True)
+    strings_path = os.path.join(values_dir, 'strings.xml')
+
+    if os.path.exists(strings_path):
+        with open(strings_path) as f:
+            current = f.read()
+        if 'name="app_name"' in current:
+            print(f"String resource already present at {strings_path}")
+            return
+        updated = current.rstrip()
+        if updated.endswith('</resources>'):
+            updated = updated[:-len('</resources>')] + "\n    <string name=\"app_name\">Lipila</string>\n</resources>\n"
+        else:
+            updated = DEFAULT_STRINGS_XML
+        with open(strings_path, 'w') as f:
+            f.write(updated)
+    else:
+        with open(strings_path, 'w') as f:
+            f.write(DEFAULT_STRINGS_XML)
+
+    print(f"Wrote {strings_path}")
+
+
+# ────────────────────────────────────────────────────────────────
+# 3. BongHceService.kt
 #
 # A minimal Android HostApduService that:
 #   - Receives startHce / stopHce / isHceSupported calls from Dart via
@@ -133,7 +169,7 @@ def patch_manifest(android_dir: str) -> None:
 #     serves the current session token as a Type 4 NDEF Text record.
 #   - Responds correctly to SELECT FILE, READ BINARY APDU sequences so
 #     nfc_manager's iso14443 polling can read the NDEF message.
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 BONG_HCE_KT = r"""package com.lipila.bong
 
@@ -263,7 +299,7 @@ class BongHceService : HostApduService() {
         selectedFileId = null
     }
 
-    // ── APDU helpers ────────────────────────────────────────────────────────
+    // ── APDU helpers ──────────────────────��─────────────────────────────────
 
     private fun isSelectApplication(apdu: ByteArray): Boolean {
         if (apdu.size < 5) return false
@@ -327,9 +363,9 @@ class BongHceService : HostApduService() {
 }
 """
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. bong_apdu_service.xml
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
+# 4. bong_apdu_service.xml
+# ────────────────────────────────────────────────────────────────
 
 BONG_APDU_XML = """<?xml version="1.0" encoding="utf-8"?>
 <!--
@@ -374,13 +410,13 @@ def write_apdu_xml(android_dir: str) -> None:
     print(f"Wrote {xml_path}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. Register BongHceService in MainActivity.kt
+# ────────────────────────────────────────────────────────────────
+# 5. Register BongHceService in MainActivity.kt
 #
 # MainActivity extends FlutterActivity. We need to call
 # BongHceService.registerWith(flutterEngine) from configureFlutterEngine()
 # so the MethodChannel is live before any Dart code runs.
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 MAIN_ACTIVITY_KT = """package com.lipila.lipila
 
@@ -411,9 +447,9 @@ def write_main_activity(android_dir: str) -> None:
     print(f"Wrote {kt_path}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 # Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -426,6 +462,7 @@ if __name__ == '__main__':
 
     print(f"=== Patching {android_dir}/ ===")
     patch_manifest(android_dir)
+    write_app_strings(android_dir)
     write_hce_service(android_dir)
     write_apdu_xml(android_dir)
     write_main_activity(android_dir)
